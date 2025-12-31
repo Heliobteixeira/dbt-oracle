@@ -44,10 +44,17 @@
 
 
 {# Helper macro to sanitize Oracle identifier (directory name) #}
+{# Only allow alphanumeric characters and underscores for identifiers #}
 {% macro oracle__sanitize_identifier(name) %}
-  {#- Only allow alphanumeric characters and underscores for identifiers -#}
-  {%- set sanitized = name | upper | regex_replace('[^A-Z0-9_]', '') -%}
-  {{ return(sanitized) }}
+  {%- set ns = namespace(result='') -%}
+  {%- set allowed_chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_' -%}
+  {%- set upper_name = name | upper -%}
+  {%- for char in upper_name -%}
+    {%- if char in allowed_chars -%}
+      {%- set ns.result = ns.result ~ char -%}
+    {%- endif -%}
+  {%- endfor -%}
+  {{ return(ns.result) }}
 {% endmacro %}
 
 
