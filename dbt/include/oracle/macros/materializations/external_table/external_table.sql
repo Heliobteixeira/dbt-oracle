@@ -30,6 +30,10 @@
   - line_terminator: Line terminator (default: 'NEWLINE')
   - skip_headers: Number of header lines to skip (default: 1, since we write headers)
   - encoding: Character encoding (default: 'AL32UTF8')
+  - column_size: Maximum column size in bytes for VARCHAR2/CHAR (default: 4000, max: 32767)
+
+  Note: The CSV export buffer size is 32767 bytes (Oracle's maximum VARCHAR2 size).
+        Rows exceeding this length will cause an error.
 
   Example usage:
     {{ config(
@@ -93,6 +97,7 @@
   {%- set line_terminator = config.get('line_terminator', 'NEWLINE') -%}
   {%- set skip_headers = config.get('skip_headers', 1) -%}
   {%- set encoding = config.get('encoding', 'AL32UTF8') -%}
+  {%- set column_size = config.get('column_size', 4000) -%}
 
   {# Sanitize inputs to prevent injection attacks #}
   {%- set directory_name = oracle__sanitize_identifier(directory_name_raw) -%}
@@ -149,7 +154,7 @@
 
   {# Step 5: Create the external table #}
   {% call statement('main') %}
-    {{ oracle__create_external_table(target_relation, directory_name, csv_file_name, column_names, field_delimiter, line_terminator, skip_headers, encoding) }}
+    {{ oracle__create_external_table(target_relation, directory_name, csv_file_name, column_names, field_delimiter, line_terminator, skip_headers, encoding, column_size) }}
   {% endcall %}
 
   {# Clean up temporary table #}
@@ -187,7 +192,19 @@
 {% endmacro %}
 
 
+{# Helper macro to escape a column name for CSV header (escape delimiter and quotes) #}
+{% macro oracle__escape_csv_value(value, delimiter) %}
+  {%- set escaped = value | replace('"', '""') -%}
+  {%- if delimiter in value or '"' in value -%}
+    "{{ escaped }}"
+  {%- else -%}
+    {{ escaped }}
+  {%- endif -%}
+{% endmacro %}
+
+
 {# Macro to export table data to CSV using UTL_FILE #}
+{# Note: v_line buffer is 32767 bytes - Oracle's maximum VARCHAR2 size #}
 {% macro oracle__export_table_to_csv(relation, directory_name, csv_file_name, column_names, field_delimiter) %}
   DECLARE
     v_file UTL_FILE.FILE_TYPE;
@@ -196,13 +213,22 @@
     -- Open file for writing
     v_file := UTL_FILE.FOPEN('{{ directory_name }}', '{{ csv_file_name }}', 'W', 32767);
 
-    -- Write header row
-    v_line := '{% for col in column_names %}{{ col }}{% if not loop.last %}{{ field_delimiter }}{% endif %}{% endfor %}';
+    -- Write header row (column names escaped for CSV format)
+    v_line := '
+      {%- for col in column_names -%}
+        {{ oracle__escape_csv_value(col, field_delimiter) }}
+        {%- if not loop.last -%}{{ field_delimiter }}{%- endif -%}
+      {%- endfor -%}
+    ';
     UTL_FILE.PUT_LINE(v_file, v_line);
 
     -- Write data rows
     FOR rec IN (SELECT * FROM {{ relation }}) LOOP
-      v_line := {% for col in column_names %}{% if not loop.first %} || '{{ field_delimiter }}' || {% endif %}NVL(TO_CHAR(rec.{{ oracle__quote_column(col) }}), ''){% endfor %};
+      v_line :=
+        {%- for col in column_names %}
+          {%- if not loop.first %} || '{{ field_delimiter }}' || {% endif -%}
+          NVL(TO_CHAR(rec.{{ oracle__quote_column(col) }}), '')
+        {%- endfor %};
       UTL_FILE.PUT_LINE(v_file, v_line);
     END LOOP;
 
@@ -219,11 +245,12 @@
 
 
 {# Macro to create external table #}
-{% macro oracle__create_external_table(relation, directory_name, csv_file_name, column_names, field_delimiter, line_terminator, skip_headers, encoding) %}
+{# column_size: Maximum column size in bytes (default 4000, max 32767 for VARCHAR2 extended) #}
+{% macro oracle__create_external_table(relation, directory_name, csv_file_name, column_names, field_delimiter, line_terminator, skip_headers, encoding, column_size) %}
   CREATE TABLE {{ relation }} (
-    {% for col in column_names %}
-      {{ oracle__quote_column(col) }} VARCHAR2(4000){% if not loop.last %},{% endif %}
-    {% endfor %}
+    {%- for col in column_names %}
+      {{ oracle__quote_column(col) }} VARCHAR2({{ column_size }}){% if not loop.last %},{% endif %}
+    {%- endfor %}
   )
   ORGANIZATION EXTERNAL (
     TYPE ORACLE_LOADER
@@ -236,9 +263,9 @@
       OPTIONALLY ENCLOSED BY '"'
       MISSING FIELD VALUES ARE NULL
       (
-        {% for col in column_names %}
-          {{ oracle__quote_column(col) }} CHAR(4000){% if not loop.last %},{% endif %}
-        {% endfor %}
+        {%- for col in column_names %}
+          {{ oracle__quote_column(col) }} CHAR({{ column_size }}){% if not loop.last %},{% endif %}
+        {%- endfor %}
       )
     )
     LOCATION ('{{ csv_file_name }}')
