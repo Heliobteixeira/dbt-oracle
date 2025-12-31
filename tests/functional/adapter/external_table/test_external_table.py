@@ -142,15 +142,30 @@ class TestExternalTableFromSeed:
         assert result[0] == 3
 
 
+# Model for full refresh testing - defined separately to avoid fragile string manipulation
+EXTERNAL_TABLE_REFRESHABLE_MODEL = """
+{{ config(
+    materialized='external_table',
+    directory_name='DBT_EXT_DIR',
+    directory_path='/tmp/dbt_external',
+    csv_file_name='refreshable.csv'
+) }}
+
+SELECT 1 as id, 'Alice' as name FROM DUAL
+UNION ALL
+SELECT 2 as id, 'Bob' as name FROM DUAL
+UNION ALL
+SELECT 3 as id, 'Charlie' as name FROM DUAL
+"""
+
+
 class TestExternalTableFullRefresh:
     """Test external table full refresh behavior."""
 
     @pytest.fixture(scope="class")
     def models(self):
         return {
-            "refreshable_ext.sql": EXTERNAL_TABLE_MODEL.replace(
-                "test_external.csv", "refreshable.csv"
-            ).replace("my_external_table", "refreshable_ext"),
+            "refreshable_ext.sql": EXTERNAL_TABLE_REFRESHABLE_MODEL,
         }
 
     def test_full_refresh(self, project):

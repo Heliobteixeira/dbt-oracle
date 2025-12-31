@@ -42,19 +42,55 @@
     SELECT * FROM my_source_table
 #}
 
+
+{# Helper macro to sanitize Oracle identifier (directory name) #}
+{% macro oracle__sanitize_identifier(name) %}
+  {#- Only allow alphanumeric characters and underscores for identifiers -#}
+  {%- set sanitized = name | upper | regex_replace('[^A-Z0-9_]', '') -%}
+  {{ return(sanitized) }}
+{% endmacro %}
+
+
+{# Helper macro to sanitize file name - prevent path traversal #}
+{% macro oracle__sanitize_filename(filename) %}
+  {#- Remove path separators and parent directory references -#}
+  {%- set sanitized = filename | replace('/', '') | replace('\\', '') | replace('..', '') -%}
+  {{ return(sanitized) }}
+{% endmacro %}
+
+
+{# Helper macro to escape single quotes in paths for Oracle strings #}
+{% macro oracle__escape_path(path) %}
+  {%- set escaped = path | replace("'", "''") -%}
+  {{ return(escaped) }}
+{% endmacro %}
+
+
+{# Helper macro to quote column name for Oracle #}
+{% macro oracle__quote_column(column_name) %}
+  {#- Use double quotes to handle reserved words and special characters -#}
+  "{{ column_name | replace('"', '""') }}"
+{% endmacro %}
+
+
 {% materialization external_table, adapter='oracle' %}
 
   {%- set identifier = model['alias'] -%}
   {%- set grant_config = config.get('grants') -%}
 
   {# Configuration for external table #}
-  {%- set directory_name = config.require('directory_name') -%}
-  {%- set directory_path = config.get('directory_path', none) -%}
-  {%- set csv_file_name = config.get('csv_file_name', identifier ~ '.csv') -%}
+  {%- set directory_name_raw = config.require('directory_name') -%}
+  {%- set directory_path_raw = config.get('directory_path', none) -%}
+  {%- set csv_file_name_raw = config.get('csv_file_name', identifier ~ '.csv') -%}
   {%- set field_delimiter = config.get('field_delimiter', ',') -%}
   {%- set line_terminator = config.get('line_terminator', 'NEWLINE') -%}
   {%- set skip_headers = config.get('skip_headers', 1) -%}
   {%- set encoding = config.get('encoding', 'AL32UTF8') -%}
+
+  {# Sanitize inputs to prevent injection attacks #}
+  {%- set directory_name = oracle__sanitize_identifier(directory_name_raw) -%}
+  {%- set csv_file_name = oracle__sanitize_filename(csv_file_name_raw) -%}
+  {%- set directory_path = oracle__escape_path(directory_path_raw) if directory_path_raw else none -%}
 
   {%- set old_relation = adapter.get_relation(database=database, schema=schema, identifier=identifier) -%}
   {%- set target_relation = api.Relation.create(identifier=identifier,
@@ -135,10 +171,10 @@
   BEGIN
     SELECT COUNT(*) INTO dir_exists
     FROM all_directories
-    WHERE directory_name = UPPER('{{ directory_name }}');
+    WHERE directory_name = '{{ directory_name }}';
 
     IF dir_exists = 0 THEN
-      EXECUTE IMMEDIATE 'CREATE OR REPLACE DIRECTORY {{ directory_name }} AS ''{{ directory_path }}''';
+      EXECUTE IMMEDIATE 'CREATE OR REPLACE DIRECTORY "{{ directory_name }}" AS ''{{ directory_path }}''';
     END IF;
   END;
 {% endmacro %}
@@ -151,15 +187,15 @@
     v_line VARCHAR2(32767);
   BEGIN
     -- Open file for writing
-    v_file := UTL_FILE.FOPEN(UPPER('{{ directory_name }}'), '{{ csv_file_name }}', 'W', 32767);
+    v_file := UTL_FILE.FOPEN('{{ directory_name }}', '{{ csv_file_name }}', 'W', 32767);
 
     -- Write header row
-    v_line := '{{ column_names | join(field_delimiter) }}';
+    v_line := '{% for col in column_names %}{{ col }}{% if not loop.last %}{{ field_delimiter }}{% endif %}{% endfor %}';
     UTL_FILE.PUT_LINE(v_file, v_line);
 
     -- Write data rows
     FOR rec IN (SELECT * FROM {{ relation }}) LOOP
-      v_line := {% for col in column_names %}{% if not loop.first %} || '{{ field_delimiter }}' || {% endif %}NVL(TO_CHAR(rec.{{ col }}), ''){% endfor %};
+      v_line := {% for col in column_names %}{% if not loop.first %} || '{{ field_delimiter }}' || {% endif %}NVL(TO_CHAR(rec.{{ oracle__quote_column(col) }}), ''){% endfor %};
       UTL_FILE.PUT_LINE(v_file, v_line);
     END LOOP;
 
@@ -179,12 +215,12 @@
 {% macro oracle__create_external_table(relation, directory_name, csv_file_name, column_names, field_delimiter, line_terminator, skip_headers, encoding) %}
   CREATE TABLE {{ relation }} (
     {% for col in column_names %}
-      {{ col }} VARCHAR2(4000){% if not loop.last %},{% endif %}
+      {{ oracle__quote_column(col) }} VARCHAR2(4000){% if not loop.last %},{% endif %}
     {% endfor %}
   )
   ORGANIZATION EXTERNAL (
     TYPE ORACLE_LOADER
-    DEFAULT DIRECTORY {{ directory_name }}
+    DEFAULT DIRECTORY "{{ directory_name }}"
     ACCESS PARAMETERS (
       RECORDS DELIMITED BY {{ line_terminator }}
       CHARACTERSET {{ encoding }}
@@ -194,7 +230,7 @@
       MISSING FIELD VALUES ARE NULL
       (
         {% for col in column_names %}
-          {{ col }} CHAR(4000){% if not loop.last %},{% endif %}
+          {{ oracle__quote_column(col) }} CHAR(4000){% if not loop.last %},{% endif %}
         {% endfor %}
       )
     )
